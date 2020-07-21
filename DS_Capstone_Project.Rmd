@@ -1,0 +1,509 @@
+---
+title: "DS Capstone Report: Netflix Project"
+author: "John Hanratty"
+date: "July 21,2020"
+output:
+  pdf_document:
+    latex_engine: xelatex
+mainfont: Arial
+---
+
+# Introduction
+
+This Capstone project focused on designing, organizing, building, testing and documenting a rudimentary movie rating prediction engine based on a particular user's historical preferences and the preferences of the overall population.  The EDX data set that was provided for the project contains about 100,000 movie reviews over the period of 1995-2015.  Each review identifies the reviewer (user), the movie, a rating assigned by the reviewer (scale 0-5), and genre classification(s) for the movie. Given the short time allotted for the capstone, additional data was neither utilized nor needed to attain the target performance metrics. The project was my first attempt at handling end-to-end development, data management and testing at a modest scale.  Learning new processes and tools were as challenging as the data science.
+
+The EDX data set required some study and massaging to enable analysis. In general, the data set was pretty clean. Some minor data grooming was required including extracting / formatting dates and massaging genre information for more convenient processing.  Subsequent sections discuss the data analysis and various modeling options that were identified and considered in the project.  
+
+Although the RMSE goals set for the capstone project were attained, there is enormous room for improvement of the model. The model predicted ratings of 3 and 4 pretty well but over estimated the other rating levels, especially 5.  The half-point ratings (i.e. 2.5, 3.5, 4.5) were underestimated largely because training data before 2002 did not record these ratings. When the model was tested with only data from after 2002 when collection half-point ratings began, the result was a much better prediction of half-points and a significant RMSE decrease from .8627 to 0.8167. Graphs are provided in the Results section below.  An investment in converting pre-2002 data might be questionalbe since fashion and entertainment preferences have changed significantly in the last 20 years. :)
+
+The project provided a great hands-on experience.  I look forward to more interesting data science projects.
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(caret)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(gridExtra)
+library(magrittr)
+library(knitr)
+library(kableExtra)
+
+options(digits=5)
+opts_chunk$set(fig.width = 4, fig.height = 3, fig.align = "center")
+
+
+# GET MODEL FUNTIONS FOR ANALYSIS
+if(!file.exists("Model_Functions_Scripts.R")) {
+  print("Working Directory not set correctly.  Cannot find Model_Functions_Scripts.R")
+  print(getwd())
+  print(list.files())
+}
+source("Model_Functions_Scripts.R")
+
+
+# GET DATA SETS FOR TESTING AND ANALYSIS
+if(file.exists("_edx_dataset") & file.exists("_val_dataset")) {
+  print("EDX USING _edx_dataset AND _val_datase IN WORKING DIRECTORY")
+  edx <- readRDS("_edx_dataset")
+  validation <- readRDS("_val_dataset")
+} else {
+  print("DOWNLOADING EDX DATASET ")
+  edx <- getEdx()
+}
+
+##===============================================================
+# CREATE TEST AND TRAIN DATA SETS FOR ANALYSIS
+##===============================================================
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE)
+train_set_raw <- edx[-test_index,]
+test_set_raw <- edx[test_index,]
+train_set <- edx[-test_index,]
+test_set <- edx[test_index,]
+
+##===============================================================
+## PRE-PROCESS DATA SETS FOR TESTING
+## Fixes dates, extracts release date, creates some fields
+##===============================================================
+test_set <- Pre_process(test_set_raw)
+train_set <- Pre_process(train_set_raw)
+edx_test_set <-    Pre_process(test_set_raw)
+edx_train_set <-   Pre_process(train_set_raw)
+edx_test_gt02 <-   edx_test_set %>% filter(reviewed > 2002)
+edx_train_gt02 <- edx_train_set %>% filter(reviewed > 2002)
+val_test_set <-    Pre_process(validation)
+edxN <-    Pre_process(edx)
+
+```
+
+
+\newpage
+# Methods/Analysis
+## Data Cleaning
+The EDX data set provided for this capstone project contains about 100,000 movie reviews submitted from 1995 to 2009.  The data fields included movieId, userId, movie title, genres, and rating. To prepare for analysis and modeling, the data set was modified to address some field formatting issues.  Other translation issues were noted and deferred to exploration, analysis or model design phases.  These additional translations usually involved choosing an approach from several that might alter the performance of the final model (e.g. normalizing or regularizing ratings).   The list below summarizes data cleaning issues with -a- indicating modifications to the base sets, and -b- indicating issues deferred for later phases 
+
+  -a- The timestamp was converted into a human-readable and lubridate compatible format.
+
+  -a- The movie release date was extracted from the title and put into a separate numeric field.
+
+  -b- In small number of cases, the review data occurred earlier than the movie release.  These were noted and deferred to later phases.
+
+  -b- The genres had some ambiguities (e.g. Sci-Fi vs. SciFi) that affected string matching.  This was handled as part the genre module of the model
+
+
+## Data Exploration (visualization)
+The EDX data set has some interesting characteristics and opportunities for analysis. A few of these are explored in this section.
+
+### Rating Distribution for Data Set
+The graph below shows rating distribution for all reviews from 1995 – 2009 and exhibits a some notable characteristics:
+
+- the distribution seams skewed to the right with a 4 rating being most popular.
+
+- the half-point ratings (e.g. 2.5, 3.5, 4.5) seem less popular.  
+
+
+```{r rating_dist, echo=FALSE, cache=TRUE, fig.width=4,fig.height=3}
+edxN %>% 
+  ggplot(aes(rating)) +
+  geom_bar(fill = "blue", col= "black", width = 0.5)  + 
+  ggtitle("Ratings Distribution 1995-2009") + 
+  xlab('Rating') + ylab('Review Count') +
+  scale_y_continuous(label = unit_format(unit = "M", scale = 1e-6)) 
+
+```
+
+The graphs below break out the ratings distribution by selected years.  They show that there are no half-point ratings before 2003.  After 2003, half-point ratings exist and seem to have the expected distribution. 2003 was a transition year between the two rating systems.   
+
+```{r rating_dist_yr, echo=FALSE, cache=TRUE, fig.width=7, fig.height=4}
+edxN %>% filter(reviewed %in% c(1996, 1999, 2002, 2003, 2005, 2008)) %>%
+  ggplot(aes(rating)) +
+  geom_bar(fill = "blue", col= "black", width = 0.5)  + 
+  ggtitle("Rating Distribution 1995-2009") + 
+  xlab('Rating') + ylab('Review Count') +
+  scale_y_continuous(label = unit_format(unit = "k", scale = 1e-3)) +
+  facet_wrap(. ~ reviewed, ncol = 3) 
+
+```
+
+The above graphs show that 4-points is the most popular rating with a distribution skewed toward higher ratings.  Further research is required to fit a distribution curve.  In addition, the years before 2003 should be smoothed to fill in the half-point gaps (or replaced by more recent data with half-point ratings).  This would allow a better comparison for all years.
+
+
+### Ratings Disribution by User
+Each user has their own unique scale for rating movies.  This makes it difficult to compare movies and make accurate recommendations.  The graph below shows the distribution of the average and median ratings rewarded by users.  The previous section shows that 80% of ratings fall within a 2-point rating window (3-4.5).  The graph below show that user rating averages vary by as much as 1.5 points on a 5-point scale.
+
+```{r user_2, echo=FALSE, cache=TRUE, fig.width=5}
+a_ave <- mean(edxN$rating)
+a_med <- median(edxN$rating)
+edxN %>%
+  group_by(userId) %>% summarize(Average = mean(rating), Median = median(rating), rsd = sd(rating)) %>%
+  gather(Statistic, svalue, Average:Median) %>%
+  ggplot() +
+     geom_density(aes(svalue, fill=Statistic), 
+                linetype = 0,  alpha=0.3) +
+     geom_vline(aes(xintercept = a_ave), 
+                linetype="dashed", size=1, colour="red", alpha = .5, show.legend = FALSE) +
+     geom_vline(aes(xintercept = a_med), 
+                linetype="dashed", size=1,  colour="blue", alpha = .5, show.legend = FALSE) +
+     geom_text(aes(label = "Average Rating "), x = 3.5, y = 3, size = 2, hjust = 1,
+               fontface="plain", colour="red", show.legend = FALSE) +
+     geom_text(aes(label = " Median Rating"), x = 4.0, y = 2.5, size = 2, hjust = 0,  
+               fontface="plain", colour="blue", show.legend = FALSE) + 
+     ggtitle("Median and Average Ratings by User") +
+     xlab("Rating") +
+     ylab("User Density")
+
+```
+It’s impossible to get all users to adopt the same rating scale retrospectively and in the future. To produce an accurate prediction model, a single rating scale is needed. The prediction model requires a translation to a standard scale for analysis. The model can then translate the prediction to account for the individual user. 
+
+
+### Genre breakdown
+One promising prediction model input is user preferences by movie genre.  This information might provide relevant information for matching users with movies.  In the EDX data set, movies are assigned one or more genres.  The table below shows the frequency of movies genre classifications.
+```{r genre_types, echo=FALSE, cache=TRUE}
+    GENRE <- edxN  %>% select(genres) %>%
+    mutate(  
+      G1 = ifelse(str_detect(genres, "Action"),   TRUE, FALSE),
+      G2 = ifelse(str_detect(genres,"Adventure"), TRUE, FALSE),
+      G3 = ifelse(str_detect(genres,"Animation"), TRUE, FALSE),
+      G4 = ifelse(str_detect(genres,"Children"),  TRUE, FALSE),
+      G5 = ifelse(str_detect(genres, "Comedy"),   TRUE, FALSE),
+      G6 = ifelse(str_detect(genres, "Crime"),    TRUE, FALSE),
+      G7 = ifelse(str_detect(genres, "Drama"),    TRUE, FALSE),
+      G8 = ifelse(str_detect(genres,"Fantasy"),   TRUE, FALSE),
+      G9 = ifelse(str_detect(genres,"Mystery"),   TRUE, FALSE),
+      G10 = ifelse(str_detect(genres,"Musical"),  TRUE, FALSE),
+      G11 = ifelse(str_detect(genres,"Romance"),  TRUE, FALSE),
+      G12 = ifelse(str_detect(genres,"Sci"),      TRUE, FALSE),
+      G13 = ifelse(str_detect(genres,"Thriller"), TRUE, FALSE),
+      G14 = ifelse(str_detect(genres,"War"),      TRUE, FALSE),
+      G15 = ifelse(str_detect(genres,"Docu"),     TRUE, FALSE),
+      G16 = ifelse(str_detect(genres,"Horr"),     TRUE, FALSE),
+      G17 = ifelse(str_detect(genres,"West"),     TRUE, FALSE),
+    ) 
+tab1 <- GENRE %>% 
+  summarize(
+    Action = sum(G1),
+    Adventrue = sum(G2),
+    Animation = sum(G3),
+    Children = sum(G4),
+    Comedy = sum(G5),
+    Crime = sum(G6),
+    Drama = sum(G7),
+    Fantasy = sum(G8),
+    Mistery = sum(G9),
+    Musical = sum(G10),
+    Romance = sum(G11),
+    Sci_Fi = sum(G12),
+    Thriller = sum(G13),
+    War = sum(G14),
+    Documentary = sum(G15),
+    Horror = sum(G16),
+    Western = sum(G17),
+  ) %>% gather(Genre, Movies, Action:Western) %>% arrange(desc(Movies)) %>% mutate(Movies = format(Movies,format="d", big.mark=",", justify="right"))
+ 
+knitr::kable(tab1, caption = "Number of Movies with Each Genre Designation", align = "r") %>%
+  kable_styling(latex_options = 
+                  c("striped", "hold_position"),
+                full_width = F)
+ 
+```
+A hypothesis is that users will tend to reward similar ratings to movies of the same genre.  Further research is required to understand the relationship.
+
+### Rating Based Movie Popularity (# Reviews)
+The table below shows that movies with more reviews tend to have higher overall ratings. A hypothesis is that more popular movies are reviewed more often. It seems plausible that this observation could improve predictions.
+
+```{r popularity,echo=FALSE, cache=TRUE}
+options(digits=3)
+tt <- edxN  %>% select(movieId, title, rating) %>%
+  group_by(movieId) %>% 
+  summarize(Reviews = n(), Average_Rating = mean(rating)) %>%
+  arrange(desc(Reviews))
+
+tt %>% 
+  ggplot(aes(Reviews, Average_Rating)) +
+  geom_point() +
+  geom_smooth(method = "loess", formula = y~x, se = FALSE) +
+  scale_x_continuous(labels = comma) +
+  ggtitle("Ratings Based on Popularity (# Reviews") + 
+  xlab('Movie Popularity (by Number of Reviews)') + ylab('Average Rating') +
+  annotate("text", x = 5000, y =2, hjust = 0, size = 3, color="blue", label = "Less popular (fewer reviews) have lower ratings")
+
+
+```
+
+
+### Reviews per Movie
+The number of reviews associated with a movie may indicate popularity but also indicate the quality of the rating average.  A large number of reviews tends to cancel the effects of ‘outlier’ reviews.  Movies with only a few reviews have less reliable ratings since one outlier review can substantially affect the average rating.  The table below shows that over a quarter of movies have fewer than 10 reviews.  This indicates that “regularization” should be considered for the prediction   
+
+```{r reviews_freq, echo=FALSE, cache=TRUE, fig.width=8}
+# Analysis of movies by #  of reviews
+# tab2 - cummulative movies 
+# - Accounting for low review-volume movies as part of movies
+tab2 <- edxN %>% 
+  group_by(movieId) %>% summarize(Reviews = n()) %>%
+  group_by(Reviews) %>% 
+  summarize(Movies=n()) %>% mutate(Cummulative_Movies = cumsum(Movies)) %>%
+  ggplot(aes(Reviews, Cummulative_Movies)) + 
+    geom_point() + 
+    scale_x_log10() +
+    scale_y_log10(labels = comma) +
+    ggtitle("Movies w/ Few Reviews vs.Total Movies") + 
+    xlab('Number of Reviews') + ylab('Cummulative Movies') +
+    annotate("text", x = 1.1, y =1000, hjust = 0, size = 3, color="blue", label = "~10% of movies have < 10 reviews")
+
+
+# tab3 - cummulative reviews 
+# - Accounting for low review-volume movies as part of all reviews
+tmp3 <- edxN %>% 
+  group_by(movieId) %>% 
+  summarize(rev_per_movie = n()) %>% 
+  group_by(rev_per_movie) %>% 
+  summarize(reviews_level  =  n()) %>% 
+  mutate(tot_rev_level = reviews_level * rev_per_movie, 
+         cumm_reviews = cumsum(tot_rev_level)) %>%
+  select(Reviews_Per_movie = rev_per_movie, Cummulative_Reviews = cumm_reviews) 
+
+Rev_at10 <- tmp3 %>% filter(Reviews_Per_movie == 10) %>% pull(Cummulative_Reviews)
+Per_at10 <- sprintf("%.3f%%",100*Rev_at10 / nrow(edxN))
+Annote_at10a <- "Movies w/ fewer than 10 reviews" 
+Annote_at10b <- paste(" represent ", Per_at10, "of all reviews")
+tab3 <- tmp3 %>%
+  ggplot(aes(Reviews_Per_movie, Cummulative_Reviews)) +
+    geom_point() +
+    scale_x_log10() +
+    scale_y_log10(labels = comma) +
+    ggtitle("Movies w/ Few Reviews vs.Total Reviews") +
+    annotate("text", x = 10, y =2000, hjust = 0, size = 3, color="blue", label = Annote_at10a) +
+    annotate("text", x = 10, y =1000, hjust = 0, size = 3, color="blue", label = Annote_at10b)
+grid.arrange(tab2, tab3, nrow=1)
+        
+```
+
+
+
+### Movie Age
+Many users have a preference for older movies, other don’t like them at all.  In this case, we defined age as the difference between the review data and release date.  As seen in the graph below, movie age might provide a useful indicator for prediction.
+
+```{r movie_age, echo=FALSE, cache=TRUE}
+edxN  %>% 
+  mutate(age = reviewed - released) %>% 
+  group_by(age) %>%
+  summarize(Reviews = n()) %>% arrange(Reviews) %>%
+  ggplot(aes(Reviews,age)) +
+  geom_point() +
+  scale_x_continuous(label = unit_format(unit = "k", scale = 1e-3)) +
+  ggtitle("Movie Age on Review Date") +  
+  xlab("Movie Review Count") +
+  ylab("Years Since Release") 
+
+```
+
+## Number of Reviews
+Some users review a lot of movies.  The question is whether this is better or worse predictions of a user’s preference.
+
+```{r reviews_by_user, echo=FALSE, cache=TRUE}
+edxN %>% 
+  group_by(userId) %>% summarize(Number_of_Reviews = n(), Average_Rating = mean(rating)) %>%
+  ggplot(aes(Number_of_Reviews, Average_Rating)) +
+  geom_point() +
+  geom_smooth(method = "loess", formula = y~x, se = FALSE) +
+  annotate("text", x = 2000, y = 1.5, hjust = 0, size = 3, color="blue", label = "Number reveiws by a user has little effect on average rating ") +
+    ggtitle("Ratings By a User's Review Volume") + 
+  xlab('Users by Number of Reviews') + ylab('Average Rating')
+
+
+
+
+```
+
+
+
+# Data Set Insights
+The previous section identifies many opportunities for developing an accurate movie rating prediction model.  Unfortunately, this capstone project does not provide enough time for a thorough investigation of all these possibilities.   For this reason, priorities were set as follows.  Further, analysis, development, and testing will tell whether these were the right choices.
+
+1.	Ratings reconciliation – A “Tower of Babble” situation exists where all users speak a different “ratings language” that makes prediction very difficult. The prediction model must collect ratings data using one user’s ratings scale, use the data to create predictions, and the match it to another user in a different ratings scale.  Addressing this problem was the first priority for this project.
+
+2.	Genre Predictions – Genre information in the data set provides the relevant personalized data for prediction.  Building an algorithm that predicts a user’s reaction based on historic ratings for movies of the same genre seemed promising.
+
+3.	Regularization – The regularization technique used in class could help account for inaccurate ratings on movies with few reviews.  This technique might be more important for a movie recommendation than for a rating prediction.  In addition, regularization might alter the ratings for a large number of movies but only apply to a small percentage of review ratings.  The regularization effects were investigated in this project.
+
+4.	Distribution smoothing – The model must predict “half-point” ratings (e.g. 2.5, 3.5, 4.5) but ther are missing in training data prior to 2003.  This will affect the model performance.  The process used in #1 above might help alleviate the problem.
+
+The items below have promise to improve predictions in future projects.
+
+•	Popularity based on number of reviews
+
+•	Movie age/era based on release date
+
+•	“Super-reviewer” analysis to see whether users with many reviews help prediction. 
+
+
+
+# Modeling Approach
+The EDS data set was divided into train_set (90%) and test_set (10%) collection of reviews.
+The model architecture followed the model described in the textbook equation. 
+ 
+   $$Y_{ugp} = \mu + \beta_u + \beta_g + \beta_p + \epsilon_...$$
+      
+A modular architecture wase implemented.  Modules were developed to perform particular $\beta$ functions and plugged together via %>% pipes to pass data between phases. Each module uses the residual training rating results from the previous module (the input – output rating).  The idea was to create a pipeline of modules can be plugged in, replaced or re-ordered. Modules were developed and added to the pipeline to hopefully provide incremental improvements. This required a standardized input/output for all modules and a simple multiplexing algorithm for sending all data over one pipe.  The training and test dataset are summited at the same time for analysis.  Most modules support this paradigm, but some scripting was used near the deadline.
+
+
+## Module1 – Baseline Use the Average
+The first module provided a starting point by predicting every review with the average rating for the movie from the training data set (training_set).  If the test_set contained movies not in the train_set, the average rating for all reviews in the training_set was used.  The function PR1_MovAve_v1 is provide in the submission package performs. 
+
+
+## Module1a – Movie Rating Adjusted for User Bias
+The 1a module improved on Module1 with a calculation that adds user rating bias (b_u) to a movie’s average rating.  b_u is the bias (+/-) calculated by subtracting the user’s average rating (u_ave) from the average of all users.   b_u is positive if the user gives higher ratings than average or negative if less that the average.
+
+The predicted rating is the movie’s average rating (m_ave) + b_u to adjust for user bias.
+
+$$Y_{u} = \mu + \beta_u$$ 
+
+1.	The train_set was used to calculate the following values for USERS:
+u_ave    =  average of the ratings in all  movie reviews by the user (1/user)
+USER_ave =  average of u_ave for all users (1 per train_set)
+b_u      =  u_ave – USER_ave
+
+2.	Calculate the following value for each movie (MOVIES):
+m_ave    = average rating for a movie using adjusted ratings by all users
+
+3.	A left_join of USERS and MOVIES to the test_set is performed and used to calculate Y (prediction):
+y_hat = m_ave + b_u
+
+4.	A left_join of USERS and MOVIES to the train_set is used to calculate the residual value used by the next stage of analysis
+residual = rating – Y   
+
+
+## Module2 – Genre Preference
+The second module uses genres to improve rating predictions.  This entails ‘spreading’ the genres for each review into individual columns for ease of calculation.
+
+### Training
+The training phase of the analysis creates a USER_GENRE.weights table, which has an entry for each user with a calculated weight (average rating) for each genre.  Each train_set review is spread to create a column (UG) for each genre weight. If the review pertains to a genre, the movie rating is added to the appropriate UG column.  The data.frame is the grouped by user.  The weight is the average rating the user gave to movies for each genre.  So, if the user reviewed three Drama movies (ratings 2, 3, 4), the weight would be 3.  
+
+### Prediction
+The test_set is spread to provide genre columns for each review. A left_join adds USER_GENRE.weights to the test_set data set.  The prediction is calculated by the average USER_GENRE.weight (UG) for all genre applicable to the movie. So, if the movie is marked with genres G1, G7, and G9.  The predicted rating is the average of the UG1, UG7, and UG9 weights. 
+
+Y = (UG1 + UG7 + UG9) / 3 
+
+The residual that feeds the next module in the analysis is calculated from the train_set.
+
+# Results
+The movie rating prediction model test results are shown on the next page for the both the edx data set and the validation set.  While the both meet the RMSE requirement for the capstone project, there is much room for improvement.   
+
+```{r model_results, echo=FALSE, cache=TRUE}
+##===============================================================
+# MODEL INTITATION AND EXECUTION SCRIPT (RUN THIS FIRST)
+
+options(digits=5)
+
+##===============================================================
+##  TEST SET ANALYSIS SCRIPTS
+##===============================================================
+# THIS FUNTION RUNS THE MODE WITH THE SPECIFIED SDATA SETS
+# 
+Run_Model <- function( TRAIN_DAT = train_set,  # the training data set
+                       TEST_DAT = test_set,    # the test data set
+                       TITLE = "RSME TEST") # string that prints with out put to identify the results
+  {  
+  options(digits=5)
+  in_y <- PackPipe(data.frame(pred = TRAIN_DAT$rating, residual = TRAIN_DAT$rating), 
+                 data.frame(pred = TEST_DAT$rating, residual = TEST_DAT$rating))
+  pipe_outr <- Ratings_Model(in_y, TRAIN_DAT, TEST_DAT)
+  test_yr <- UnpackPipe(pipe_outr, 2)
+  pipe_outgro <- Ratings_Model(in_y, TRAIN_DAT, TEST_DAT) %>% Genre_Model(TRAIN_DAT, TEST_DAT)  #CALLS ANALYSIS FUNCTIONS PR2_U_M_v1 & GENRE_FACTOR_ave_v1()
+  test_ygro <- UnpackPipe(pipe_outgro, 2)
+  # address the handful of values <0 or >5
+  test_out <- fast_oob(test_ygro$pred + test_yr$pred) 
+  # Bucketize Results
+  test_tt <- round(2*test_out)/2       
+#  print(TITLE)
+#  print(paste("RMSE: ", RMSE(test_tt, TEST_DAT$rating),5))
+  test_tt
+}
+
+##===============================================================
+# THIS FUNTION GRAPHS THE RESULST OF Run_Model
+# 
+Graph_Model <- function(DATA1,                    # Output of model (Predictions)
+                        DATA2 = test_set$rating,  # Reference set (Actual Ratings)
+                        GTITLE = "Rating Model Performance",
+                        SUBTITLE1 = "", 
+                        SUBTITLE2 = "" ) {
+options(digits=6)
+hcount <- max(sum(DATA1 == 4), max(DATA1 == 3.5), max(DATA2 == 4), max(DATA2==3.5))
+rmse_label = paste("RMSE = ", round(RMSE(DATA1, DATA2), 4))
+data.frame(Actual = DATA1, Predicted = DATA2) %>% 
+  gather(Data_Source, Rating, Actual:Predicted)%>% 
+  ggplot(aes(x=Rating, fill=Data_Source)) + 
+  geom_bar(position = position_dodge(width=0.3)) +
+  scale_y_continuous(label = unit_format(unit = "k", scale = 1e-3)) +
+  ggtitle(GTITLE) +
+  annotate("text", label = SUBTITLE1,  x = 0.5, y = round(.8*hcount), fontface = 1, size = 3, hjust = 0) +
+  annotate("text", label = SUBTITLE2,  x = 0.5, y = round(.7*hcount), fontface = 1, size = 3, hjust = 0) +
+  annotate("text", label = rmse_label, x = 0.5, y = round(.5*hcount), fontface = 2, size = 3, hjust = 0) +
+  xlab("Rating") +
+  ylab("Review Count") +
+  labs(fill = "Ratings")  
+}
+
+
+##===============================================================
+## RUN MODEL AGAINST DATA SETS AND GRAPH RESULTS
+##===============================================================
+defaultW <- getOption("warn")  #turn off warining that files don't have final <cr>
+options(warn = -1)
+
+dat_edx <-Run_Model(edx_train_set, edx_test_set, "EDX Train (all) &  EDX TEST (all)")
+gr_edx <- Graph_Model(dat_edx, 
+                         edx_test_set$rating,
+                         "Rating Model Performance",
+                         "Train:     EDX Train Set",
+                         "Reference: EDX Test Set")
+
+dat_val <-Run_Model(edx_train_set, val_test_set, "EDX Train (all) & Validation (all) Sets")
+gr_val <- Graph_Model(dat_val, 
+                         val_test_set$rating,
+                         "Rating Model Performance",
+                         "Train:     EDX Train Set",
+                         "Reference: Validation Set ")
+
+dat_gt02edx <-Run_Model(edx_train_gt02, edx_test_gt02, "EDX Train (>2002)  & Test Sets (>2002) ")
+gr_gt02edx <- Graph_Model(dat_gt02edx, 
+                             edx_test_gt02$rating,
+                             "Rating Model Performance",
+                             "Train:     EDX Post-2002 ",
+                             "Reference: EDX Post-2002 ")
+
+options(warn = defaultW)
+
+
+```
+Looking at the graphs, the predictions for whole-point ratings were relatively good. The half-point ratings (i.e. 2,5, 3.5, 4.5) were under-estimated.   This points to a need to modify the data set to remove these holes from the training input as pointed out in the analysis section of this document.  To understand this better, the model was trained with data more recent than 2002, which contains half-point ratings at expected ratios. Prior to 2002, the data does not contain half-pints.  The results show in the 3rd graph below that the RMSE fell from 0.862 to 0.817, a significant improvement.  This indicates that the training data needs half-point data, real or simulated.  This requires further study.
+
+The model also over-estimated the ratings < 2 and badly for ratings of 5.  The model may lower these predictions because it depends on averages in for predicting the ratings which distort the distribution.  Alternative treatment might help here.   Again, topic for further study
+
+The issues above should have the highest priority.  Once solved, additional enhancements around file age or popularity could further enhance accuracy.
+
+```{r graph_val, echo=FALSE, cache=TRUE, fig.width = 7}
+gr_val
+```
+
+```{r graph_edx, echo=FALSE, cache=TRUE, fig.width = 7}
+gr_edx
+```
+
+
+
+```{r graph_gt02, echo=FALSE, cache=TRUE, fig.width = 7}
+gr_gt02edx
+```
+
+
+# Conclusion
+This capstone project provided good real-world experience managing, designing and testing data science projects.  There are many components that must come together to execute a complicated data analysis program including version control, model architectures, performance issues, and final packaging.  This was very good experience.  
+
+We only scratched the surface for the movie rating prediction model.  There are many moving parts and interrelationships. The project gave me first-hand experience grooming and analyzing a large data set.  I know that the problems will increase as data set grow in size.  I look forward to these challenges. 
+ 
+
+
